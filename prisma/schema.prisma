@@ -1,0 +1,536 @@
+// This is your Prisma schema file for EduShare
+// Learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // DATABASE_URL  → Supabase SESSION MODE pooler (for runtime queries)
+  // DIRECT_URL    → Supabase direct connection (for migrations only)
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  STUDENT
+  FACULTY
+  ADMIN
+}
+
+enum UserStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum SubmissionStatus {
+  PENDING
+  SUBMITTED
+  REVIEWED
+}
+
+enum ReportReason {
+  INAPPROPRIATE
+  BULLYING
+  UNRELATED
+  SPAM
+  OTHER
+}
+
+enum ReportStatus {
+  PENDING
+  RESOLVED
+  DISMISSED
+}
+
+// Phase 2 Enums
+
+enum LessonStatus {
+  LOCKED
+  UNLOCKED
+  COMPLETED
+}
+
+enum AssessmentType {
+  MULTIPLE_CHOICE
+  MULTIPLE_SELECT
+  MATCHING
+  TRUE_OR_FALSE
+  SHORT_ANSWER
+}
+
+enum AttemptStatus {
+  IN_PROGRESS
+  PASSED
+  FAILED
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+model User {
+  id             String     @id @default(cuid())
+  /// Must match the Supabase Auth user id (auth.users.id)
+  email          String     @unique
+  name           String
+  avatarUrl      String?
+  coverUrl       String?
+  department     String?
+  role           Role       @default(STUDENT)
+  isActive       Boolean    @default(true)
+  approvalStatus UserStatus @default(APPROVED)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  // Relations
+  taughtClasses      Class[]             @relation("FacultyClasses")
+  memberships        ClassMembership[]
+  posts              Post[]
+  comments           Comment[]
+  submissions        Submission[]
+  notifications      Notification[]
+  reportsFiled       Report[]            @relation("ReporterRelation")
+  reportsAgainst     Report[]            @relation("ReportedUserRelation")
+  // Phase 2
+  lessonProgress     LessonProgress[]
+  assessmentAttempts AssessmentAttempt[]
+  auditLogs          AuditLog[]
+  uploadedMaterials  ClassMaterial[]     @relation("MaterialUploader")
+  attendanceRecords  AttendanceRecord[]
+
+  @@map("users")
+}
+
+model Class {
+  id               String   @id @default(cuid())
+  name             String
+  subject          String
+  description      String?
+  syllabusOverview String?  @db.Text
+  learningOutcomes String?  @db.Text
+  gradingPolicy    String?  @db.Text
+  weeklySchedule   String?  @db.Text
+  classCode        String   @unique
+  inviteLink       String?  @unique
+  isArchived       Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  // Relations
+  facultyId          String
+  faculty            User                @relation("FacultyClasses", fields: [facultyId], references: [id], onDelete: Cascade)
+  members            ClassMembership[]
+  posts              Post[]
+  // Phase 2
+  lessons            Lesson[]
+  materials          ClassMaterial[]
+  attendanceSessions AttendanceSession[]
+
+  @@index([facultyId])
+  @@map("classes")
+}
+
+/// Course files such as the official syllabus, readings, and class handouts.
+model ClassMaterial {
+  id           String   @id @default(cuid())
+  classId      String
+  class        Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  uploadedById String
+  uploadedBy   User     @relation("MaterialUploader", fields: [uploadedById], references: [id], onDelete: Cascade)
+  title        String
+  description  String?
+  fileName     String
+  fileUrl      String
+  fileKey      String
+  fileType     String
+  fileSize     Int
+  createdAt    DateTime @default(now())
+
+  @@index([classId, createdAt])
+  @@map("class_materials")
+}
+
+/// One attendance roll call for a class meeting.
+model AttendanceSession {
+  id          String             @id @default(cuid())
+  classId     String
+  class       Class              @relation(fields: [classId], references: [id], onDelete: Cascade)
+  sessionDate DateTime           @db.Date
+  title       String
+  notes       String?            @db.Text
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  records     AttendanceRecord[]
+
+  @@unique([classId, sessionDate, title])
+  @@index([classId, sessionDate])
+  @@map("attendance_sessions")
+}
+
+/// A student's attendance status for one class meeting. Null means unmarked.
+model AttendanceRecord {
+  id        String            @id @default(cuid())
+  sessionId String
+  session   AttendanceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  studentId String
+  student   User              @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  status    AttendanceStatus?
+  updatedAt DateTime          @updatedAt
+
+  @@unique([sessionId, studentId])
+  @@index([studentId])
+  @@map("attendance_records")
+}
+
+model ClassMembership {
+  id       String   @id @default(cuid())
+  joinedAt DateTime @default(now())
+
+  // Relations
+  classId   String
+  class     Class  @relation(fields: [classId], references: [id], onDelete: Cascade)
+  studentId String
+  student   User   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, studentId])
+  @@index([classId])
+  @@index([studentId])
+  @@map("class_memberships")
+}
+
+model Post {
+  id                 String    @id @default(cuid())
+  content            String
+  category           String?
+  isPinned           Boolean   @default(false)
+  /// Set to true when this post requires student submissions (like an assignment)
+  isSubmissionPost   Boolean   @default(false)
+  submissionDeadline DateTime?
+  /// Optional external URL attached to this post by the faculty
+  attachedLink       String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  // Relations
+  classId     String
+  class       Class        @relation(fields: [classId], references: [id], onDelete: Cascade)
+  authorId    String
+  author      User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  files       PostFile[]
+  comments    Comment[]
+  submissions Submission[]
+  reports     Report[]
+
+  @@index([classId])
+  @@index([authorId])
+  @@index([classId, isPinned, createdAt])
+  @@map("posts")
+}
+
+model PostFile {
+  id       String @id @default(cuid())
+  fileName String
+  fileUrl  String
+  fileType String
+  fileSize Int /// File size in bytes
+
+  // Relations
+  postId String
+  post   Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([postId])
+  @@map("post_files")
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  content   String
+  createdAt DateTime @default(now())
+
+  // Relations
+  postId   String
+  post     Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+  authorId String
+  author   User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([postId])
+  @@index([authorId])
+  @@map("comments")
+}
+
+model Submission {
+  id          String           @id @default(cuid())
+  fileUrl     String
+  fileName    String
+  fileType    String
+  status      SubmissionStatus @default(PENDING)
+  /// Faculty-entered assignment grade on a 0–100 point scale.
+  score       Float?
+  /// Faculty feedback visible to the student after grading.
+  feedback    String?
+  submittedAt DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  // Relations
+  postId    String
+  post      Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+  studentId String
+  student   User   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, studentId])
+  @@index([postId])
+  @@index([studentId])
+  @@map("submissions")
+}
+
+model Report {
+  id          String       @id @default(cuid())
+  reason      ReportReason
+  description String?
+  status      ReportStatus @default(PENDING)
+  actionTaken String?
+  createdAt   DateTime     @default(now())
+  resolvedAt  DateTime?
+
+  // Relations
+  reporterId     String
+  reporter       User    @relation("ReporterRelation", fields: [reporterId], references: [id], onDelete: Cascade)
+  reportedUserId String?
+  reportedUser   User?   @relation("ReportedUserRelation", fields: [reportedUserId], references: [id], onDelete: SetNull)
+  postId         String?
+  post           Post?   @relation(fields: [postId], references: [id], onDelete: SetNull)
+
+  @@index([reporterId])
+  @@index([reportedUserId])
+  @@index([postId])
+  @@index([status])
+  @@map("reports")
+}
+
+model Notification {
+  id          String   @id @default(cuid())
+  type        String /// e.g. "NEW_POST", "NEW_COMMENT", "SUBMISSION_REVIEWED"
+  message     String
+  isRead      Boolean  @default(false)
+  /// Optional: ID of the related entity (post, submission, etc.)
+  referenceId String?
+  /// Optional: Destination path when the notification is clicked
+  link        String?
+  createdAt   DateTime @default(now())
+
+  // Relations
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+// ─── Phase 2: Lesson + Assessment Engine ─────────────────────────────────────
+
+/// A sequential video lesson belonging to a Class section.
+/// Students must watch >= 95% before the assessment unlocks.
+model Lesson {
+  id      String @id @default(cuid())
+  classId String
+  class   Class  @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  title         String
+  description   String?
+  order         Int // 1-based sequence position
+  videoUrl      String // Supabase Storage public URL
+  videoKey      String // Supabase Storage object key (for deletion)
+  videoDuration Int // Total seconds — set after upload
+  thumbnailUrl  String? // Auto-generated or manually uploaded
+  isPublished   Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  assessment Assessment?
+  progress   LessonProgress[]
+
+  @@unique([classId, order]) // No duplicate order within a class
+  @@index([classId])
+  @@map("lessons")
+}
+
+/// Tracks each student's watch progress per lesson.
+/// Heartbeat-based — updated every 5 seconds while watching.
+model LessonProgress {
+  id        String @id @default(cuid())
+  lessonId  String
+  lesson    Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  studentId String
+  student   User   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  watchedSeconds Int       @default(0) // Cumulative seconds watched
+  highestSecond  Int       @default(0) // Furthest point reached (anti-skip)
+  isCompleted    Boolean   @default(false) // true when highestSecond >= 95% of videoDuration
+  completedAt    DateTime?
+  lastHeartbeat  DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([lessonId, studentId])
+  @@index([lessonId])
+  @@index([studentId])
+  @@map("lesson_progress")
+}
+
+/// One assessment per lesson. Unlocks only when lesson is completed.
+model Assessment {
+  id       String @id @default(cuid())
+  lessonId String @unique
+  lesson   Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  title            String
+  instructions     String?
+  passingScore     Int      @default(75) // Minimum percentage to pass
+  maxAttempts      Int      @default(3) // 0 = unlimited retries
+  timeLimitMins    Int? // null = no time limit
+  shuffleQuestions Boolean  @default(false)
+  showResults      Boolean  @default(true) // Show score after submission
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relations
+  questions Question[]
+  attempts  AssessmentAttempt[]
+
+  @@map("assessments")
+}
+
+/// A single question inside an Assessment.
+/// Supports 5 question types via AssessmentType enum.
+model Question {
+  id           String     @id @default(cuid())
+  assessmentId String
+  assessment   Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+
+  type         AssessmentType
+  order        Int
+  questionText String
+  points       Int            @default(1)
+  imageUrl     String? // Optional image attachment per question
+  explanation  String? // Shown to student after submission
+
+  // Relations
+  choices    QuestionChoice[]
+  matchPairs MatchPair[]
+  answers    StudentAnswer[]
+
+  @@unique([assessmentId, order])
+  @@index([assessmentId])
+  @@map("questions")
+}
+
+/// Answer choices for MULTIPLE_CHOICE, MULTIPLE_SELECT, TRUE_OR_FALSE.
+model QuestionChoice {
+  id         String   @id @default(cuid())
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  choiceText String
+  isCorrect  Boolean @default(false)
+  order      Int
+
+  @@index([questionId])
+  @@map("question_choices")
+}
+
+/// Left-right pairs for MATCHING type questions.
+model MatchPair {
+  id         String   @id @default(cuid())
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  leftItem  String // The prompt (shown on left)
+  rightItem String // The correct answer (shown on right, shuffled)
+  order     Int
+
+  @@index([questionId])
+  @@map("match_pairs")
+}
+
+/// One attempt record per student per assessment attempt number.
+model AssessmentAttempt {
+  id           String     @id @default(cuid())
+  assessmentId String
+  assessment   Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  studentId    String
+  student      User       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  attemptNumber Int // 1, 2, 3... incremented per student
+  score         Float? // Percentage: 0.0 - 100.0 (null until submitted)
+  totalPoints   Int? // Max possible points for this attempt
+  earnedPoints  Float? // Actual points earned
+  status        AttemptStatus @default(IN_PROGRESS)
+  startedAt     DateTime      @default(now())
+  submittedAt   DateTime?
+  timeLimitEnd  DateTime? // startedAt + timeLimitMins (null if no limit)
+
+  // Relations
+  answers StudentAnswer[]
+
+  @@unique([assessmentId, studentId, attemptNumber])
+  @@index([assessmentId])
+  @@index([studentId])
+  @@map("assessment_attempts")
+}
+
+/// One answer record per question per attempt.
+model StudentAnswer {
+  id         String            @id @default(cuid())
+  attemptId  String
+  attempt    AssessmentAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  questionId String
+  question   Question          @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  // MULTIPLE_CHOICE / TRUE_OR_FALSE: one choiceId in array
+  // MULTIPLE_SELECT: multiple choiceIds in array
+  selectedChoiceIds String[] @default([])
+
+  // MATCHING: JSON array [{leftItem: string, selectedRightItem: string}]
+  matchAnswers Json?
+
+  // SHORT_ANSWER: plain text
+  textAnswer String?
+
+  // Grading
+  isCorrect    Boolean? // null = not yet graded (SHORT_ANSWER)
+  pointsEarned Float    @default(0)
+
+  @@unique([attemptId, questionId])
+  @@index([attemptId])
+  @@index([questionId])
+  @@map("student_answers")
+}
+
+/// Immutable Audit Log for Admin tracking
+model AuditLog {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action       String // e.g. "DELETE_POST", "REVIEW_SUBMISSION"
+  resourceType String // e.g. "POST", "SUBMISSION"
+  resourceId   String // the ID of the resource affected
+  details      Json // Snapshot of before/after state
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+  @@index([resourceId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
